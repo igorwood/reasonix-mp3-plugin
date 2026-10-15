@@ -6,6 +6,7 @@
 会真播几秒音乐（验证 afplay），并在 <workspace>/.selftest-home 下写测试用 playlist.json。
 """
 
+import glob
 import json
 import os
 import select
@@ -19,6 +20,7 @@ WS = os.path.dirname(ROOT)
 SELFTEST_HOME = os.path.join(WS, ".selftest-home")
 SUBDIR = os.path.join(WS, "selftest-tmp")
 FAKE_PICK = os.path.join(WS, ".selftest-pick.txt")
+OTHER_MP3 = sorted(glob.glob(os.path.join(WS, "*.mp3")))[0]  # 工作区里的真 mp3（用于替换测试）
 EXTRA_MP3 = os.path.join(SUBDIR, "extra.mp3")
 
 shutil.rmtree(SELFTEST_HOME, ignore_errors=True)
@@ -115,6 +117,19 @@ card_actions = [a["actionId"] for a in cl.get("actions", [])]
 check("卡片三按钮 toggle+mode+add", card_actions == ["toggle", "mode", "add"], card_actions)
 check("卡片无 fields（精简）", "fields" not in cl)
 
+print("== 2a. 预载播放列表（＋ 选择一批）")
+with open(FAKE_PICK, "w", encoding="utf-8") as fh:
+    fh.write(EXTRA_MP3 + "\n")
+send({"jsonrpc": "2.0", "id": 20, "method": "extension/ui/action",
+      "params": {"actionId": "add", "sessionId": "selftest", "generation": 1}})
+call_response(20)
+note = next_frame(lambda f: is_publish(f, "notification"))
+check("载入后通知「播放列表已更新」", note and "播放列表已更新" in note["params"]["payload"].get("title", ""),
+      note["params"]["payload"].get("title") if note else "no notification")
+pf = os.path.join(SELFTEST_HOME, "mp3-player", "playlist.json")
+saved = json.load(open(pf, encoding="utf-8")) if os.path.exists(pf) else {}
+check("playlist.json 记录所选文件", any(p.endswith("extra.mp3") for p in saved.get("tracks", [])), saved)
+
 print("== 2b. session.start 事件 -> 用真实会话重新发布")
 send({"jsonrpc": "2.0", "method": "extension/event", "params": {
     "event": "session.start",
@@ -158,19 +173,21 @@ check("mode 回 accepted", bool((r or {}).get("result", {}).get("accepted")))
 st_mode = next_frame(lambda f: is_publish(f, "status") and "顺序" in f["params"]["payload"].get("detail", ""))
 check("切到顺序后 detail 含「顺序」", st_mode is not None)
 
-print("== 4. add -> 系统文件选择器(fake) -> 加入持久列表")
+print("== 4. 再次选择不同的 mp3 -> 替换旧列表")
 with open(FAKE_PICK, "w", encoding="utf-8") as fh:
-    fh.write(EXTRA_MP3 + "\n")
+    fh.write(OTHER_MP3 + "\n" + EXTRA_MP3 + "\n")
 send({"jsonrpc": "2.0", "id": 3, "method": "extension/ui/action",
       "params": {"actionId": "add", "sessionId": "selftest", "generation": 1}})
 r = call_response(3)
 check("add 回 accepted", bool((r or {}).get("result", {}).get("accepted")))
 note = next_frame(lambda f: is_publish(f, "notification"))
-check("添加成功有 notification", note and "已添加" in note["params"]["payload"].get("title", ""),
+check("替换后通知「播放列表已更新」", note and "播放列表已更新" in note["params"]["payload"].get("title", ""),
       note["params"]["payload"].get("title") if note else "no notification")
-pf = os.path.join(SELFTEST_HOME, "mp3-player", "playlist.json")
 saved = json.load(open(pf, encoding="utf-8")) if os.path.exists(pf) else {}
-check("playlist.json 已写入新增路径", any(p.endswith("extra.mp3") for p in saved.get("tracks", [])), saved)
+check("旧列表被替换为新的 2 首",
+      len(saved.get("tracks", [])) == 2
+      and any(p.endswith(os.path.basename(OTHER_MP3)) for p in saved["tracks"])
+      and any(p.endswith("extra.mp3") for p in saved["tracks"]), saved)
 
 print("== 5. 非法输入被拒绝（非 mp3 / 不存在）")
 with open(FAKE_PICK, "w", encoding="utf-8") as fh:
@@ -180,7 +197,7 @@ send({"jsonrpc": "2.0", "id": 4, "method": "extension/ui/action",
 call_response(4)
 note = next_frame(lambda f: is_publish(f, "notification"))
 check("拒绝非 mp3 / 不存在并提示",
-      note and "没有添加任何文件" in note["params"]["payload"].get("title", ""),
+      note and "没有载入任何文件" in note["params"]["payload"].get("title", ""),
       note["params"]["payload"].get("title") if note else "no notification")
 
 print("== 6. 空选择（取消）不崩溃")
