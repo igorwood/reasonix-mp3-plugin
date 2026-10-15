@@ -461,6 +461,24 @@ class Sidecar(object):
         self.publish_status()
         self.publish_card()
         threading.Thread(target=self._republish_loop, daemon=True).start()
+        threading.Thread(target=self._watch_workspace, daemon=True).start()
+
+    def _watch_workspace(self):
+        """定期重扫工作区：新下载的 mp3 自动出现在播放列表。"""
+        while True:
+            time.sleep(4.0)
+            if not self.player:
+                continue
+            before = list(self.player.workspace_tracks)
+            try:
+                self.player.rescan_workspace()
+            except Exception as exc:  # noqa: BLE001
+                log("workspace rescan error: %r" % exc)
+                continue
+            after = self.player.workspace_tracks
+            if after != before:
+                log("workspace changed: %d -> %d tracks" % (len(before), len(after)))
+                self.refresh_ui()
 
     def _republish_loop(self):
         """兜底：前端可能在 runtime 构建早期丢弃 surface；持续重发一段时间覆盖就绪窗口。"""
@@ -569,6 +587,7 @@ class Sidecar(object):
         if not self.session:
             return
         out, err, rc = self._pick_files()
+        log("add: pick rc=%s out=%r err=%r" % (rc, (out or "")[:300], (err or "")[:200]))
         if rc != 0 or not out.strip():
             low = err.lower()
             if "cancel" in low or "(-128)" in low:
@@ -578,7 +597,9 @@ class Sidecar(object):
             self.notify("添加 mp3 失败", (err.strip() or "没有选择文件")[:200], "warn")
             return
         parts = [ln.strip().strip('"') for ln in out.splitlines() if ln.strip()]
+        log("add: parts=%r" % parts[:6])
         added, rejected = self.player.add_paths(parts)
+        log("add: added=%d rejected=%d %r" % (len(added), len(rejected), rejected[:6]))
         if added:
             self.notify("已添加 %d 首" % len(added),
                         "\n".join(short_name(p) for p in added), "info")
