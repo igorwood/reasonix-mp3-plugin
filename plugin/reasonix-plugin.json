@@ -1,0 +1,15 @@
+{
+  "apiVersion": "reasonix.io/plugin/v2",
+  "name": "mp3-player",
+  "version": "0.4.0",
+  "description": "低栏 mp3 播放器（🎵）：卡片按钮控制播放与添加文件",
+  "provides": [
+    {"namespace": "plugin/mp3-player", "kind": "interceptors", "id": "default", "version": "0.4.0"}
+  ],
+  "runtime": {
+    "command": "${REASONIX_PLUGIN_ROOT}/sidecar.py",
+    "args": [],
+    "intercepts": ["session.start", "session.load", "session.rotate"],
+    "capabilities": ["interceptors", "ui"]
+  }
+}

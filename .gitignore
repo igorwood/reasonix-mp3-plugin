@@ -1,0 +1,10 @@
+# 运行/调试产物
+*.log
+*.orig
+*.bak
+__pycache__/
+*.pyc
+patched*.js
+.selftest-home/
+.selftest-pick.txt
+selftest-tmp/
