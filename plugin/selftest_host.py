@@ -209,10 +209,14 @@ call_response(5)
 note = next_frame(lambda f: is_publish(f, "notification"))
 check("空选择给出提示且进程存活", note is not None and PROC.poll() is None)
 
-print("== 7. toggle -> 停止")
+print("== 7. 确保播放 -> toggle 停止")
 send({"jsonrpc": "2.0", "id": 6, "method": "extension/ui/action",
-      "params": {"actionId": "toggle", "sessionId": "selftest", "generation": 1}})
+      "params": {"actionId": "play:0", "sessionId": "selftest", "generation": 1}})
 call_response(6)
+next_frame(lambda f: is_publish(f, "status") and "播放中" in f["params"]["payload"].get("detail", ""))
+send({"jsonrpc": "2.0", "id": 16, "method": "extension/ui/action",
+      "params": {"actionId": "toggle", "sessionId": "selftest", "generation": 1}})
+call_response(16)
 st = next_frame(lambda f: is_publish(f, "status")
                 and "已停止" in f["params"]["payload"].get("detail", ""))
 check("停止后 chip detail 含「已停止」", st is not None, TRACE[-6:])
