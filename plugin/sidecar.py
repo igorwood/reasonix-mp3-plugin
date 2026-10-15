@@ -99,9 +99,8 @@ def short_name(path, limit=NAME_MAX):
 class Player(object):
     def __init__(self, workspace):
         self.workspace = workspace
-        self.workspace_tracks = []   # 工作区扫描结果
-        self.extra_tracks = []       # 手动添加的持久列表
-        self.tracks = []             # 合并去重后的播放列表
+        self.selection = []          # 用户通过「＋」选择的文件（持久化）
+        self.tracks = []             # 播放列表（= selection）
         self.index = -1
         self.proc = None
         self.playing = False
@@ -110,49 +109,34 @@ class Player(object):
         self._lock = threading.Lock()
         self.on_change = None
 
-    # -- 列表维护
-    def _merge(self):
-        seen = set()
-        merged = []
-        for p in list(self.workspace_tracks) + list(self.extra_tracks):
-            rp = os.path.realpath(p)
-            if rp in seen or not os.path.isfile(p):
-                continue
-            seen.add(rp)
-            merged.append(p)
-        self.tracks = merged
-
-    def rescan_workspace(self):
+    # -- 列表维护（播放列表完全由用户「＋」选择的文件决定）
+    def _rebuild(self):
         with self._lock:
-            files = glob.glob(os.path.join(self.workspace, "*.mp3"))
-            self.workspace_tracks = sorted(files)
-            self._merge()
+            self.tracks = list(self.selection)
 
     def load_playlist(self):
-        with self._lock:
-            try:
-                with open(playlist_path(), encoding="utf-8") as fh:
-                    data = json.load(fh)
-                extra = data.get("tracks", [])
-                if isinstance(extra, list):
-                    self.extra_tracks = [p for p in extra if isinstance(p, str)]
-            except (OSError, ValueError):
-                self.extra_tracks = []
-            self._merge()
+        try:
+            with open(playlist_path(), encoding="utf-8") as fh:
+                data = json.load(fh)
+            sel = data.get("tracks", [])
+            if isinstance(sel, list):
+                self.selection = [p for p in sel if isinstance(p, str) and os.path.isfile(p)]
+        except (OSError, ValueError):
+            self.selection = []
+        self._rebuild()
 
     def save_playlist(self):
         try:
             with open(playlist_path(), "w", encoding="utf-8") as fh:
-                json.dump({"tracks": self.extra_tracks}, fh, ensure_ascii=False, indent=2)
+                json.dump({"tracks": self.selection}, fh, ensure_ascii=False, indent=2)
         except OSError as exc:
             log("save playlist failed: %r" % exc)
 
-    def add_paths(self, paths):
-        """校验（仅 .mp3 且存在）并加入持久列表。返回 (added, rejected)。"""
-        added, rejected = [], []
-        seen = {os.path.realpath(p) for p in self.tracks}
+    def set_selection(self, paths):
+        """用新选择**替换**整个播放列表。返回 (accepted, rejected)。"""
+        accepted, rejected, seen = [], [], set()
         for raw in paths:
-            cand = raw.strip().strip('"').strip("'")
+            cand = (raw or "").strip().strip('"').strip("'")
             if not cand:
                 continue
             if cand.startswith("~"):
@@ -167,16 +151,17 @@ class Player(object):
                 continue
             rp = os.path.realpath(cand)
             if rp in seen:
-                rejected.append("%s（已在列表）" % short_name(cand))
                 continue
             seen.add(rp)
-            self.extra_tracks.append(os.path.abspath(cand))
-            added.append(cand)
-        if added:
+            accepted.append(os.path.abspath(cand))
+        if accepted:
             with self._lock:
-                self._merge()
+                self.selection = accepted
+                self._kill_locked()   # 列表变了，停止当前播放
+                self.index = -1
+            self._rebuild()
             self.save_playlist()
-        return added, rejected
+        return accepted, rejected
 
     # -- 播放
     def _notify(self):
@@ -439,7 +424,6 @@ class Sidecar(object):
             self.session["sessionId"], self.session["generation"], self.session["workspaceRoot"]))
         self.player = Player(self.session["workspaceRoot"])
         self.player.on_change = self.refresh_ui
-        self.player.rescan_workspace()
         self.player.load_playlist()
         self._reply(req_id, {
             "name": PLUGIN_NAME,
@@ -461,24 +445,6 @@ class Sidecar(object):
         self.publish_status()
         self.publish_card()
         threading.Thread(target=self._republish_loop, daemon=True).start()
-        threading.Thread(target=self._watch_workspace, daemon=True).start()
-
-    def _watch_workspace(self):
-        """定期重扫工作区：新下载的 mp3 自动出现在播放列表。"""
-        while True:
-            time.sleep(4.0)
-            if not self.player:
-                continue
-            before = list(self.player.workspace_tracks)
-            try:
-                self.player.rescan_workspace()
-            except Exception as exc:  # noqa: BLE001
-                log("workspace rescan error: %r" % exc)
-                continue
-            after = self.player.workspace_tracks
-            if after != before:
-                log("workspace changed: %d -> %d tracks" % (len(before), len(after)))
-                self.refresh_ui()
 
     def _republish_loop(self):
         """兜底：前端可能在 runtime 构建早期丢弃 surface；持续重发一段时间覆盖就绪窗口。"""
@@ -535,8 +501,6 @@ class Sidecar(object):
                 self.session["sessionId"], self.session["generation"], self.session["workspaceRoot"]))
             if self.player and self.session["workspaceRoot"] != old_ws:
                 self.player.workspace = self.session["workspaceRoot"]
-                self.player.rescan_workspace()
-                self.player.load_playlist()
         self.publish_status()
         self.publish_card()
 
@@ -598,13 +562,13 @@ class Sidecar(object):
             return
         parts = [ln.strip().strip('"') for ln in out.splitlines() if ln.strip()]
         log("add: parts=%r" % parts[:6])
-        added, rejected = self.player.add_paths(parts)
-        log("add: added=%d rejected=%d %r" % (len(added), len(rejected), rejected[:6]))
-        if added:
-            self.notify("已添加 %d 首" % len(added),
-                        "\n".join(short_name(p) for p in added), "info")
+        accepted, rejected = self.player.set_selection(parts)
+        log("add: accepted=%d rejected=%d %r" % (len(accepted), len(rejected), rejected[:6]))
+        if accepted:
+            self.notify("播放列表已更新（%d 首）" % len(accepted),
+                        "\n".join(short_name(p) for p in accepted[:8]), "info")
         elif rejected:
-            self.notify("没有添加任何文件", "\n".join(rejected[:5]), "warn")
+            self.notify("没有载入任何文件", "\n".join(rejected[:5]), "warn")
         else:
             self.notify("没有选择任何文件", "", "warn")
         self.refresh_ui()
@@ -629,6 +593,8 @@ class Sidecar(object):
             cand = os.path.dirname(st["tracks"][idx])
             if os.path.isdir(cand):
                 default_dir = cand
+        elif self.player and os.path.isdir(self.player.workspace):
+            default_dir = self.player.workspace   # 列表为空时定位到工作区
         loc = " default location (POSIX file %s)" % _as_apple_str(default_dir) if default_dir else ""
         script = (
             'set fs to choose file with prompt %s%s '
